@@ -16,6 +16,7 @@ namespace comp
         static void shannon_fano_decode(const std::string&);
         static const std::string sf_ext;
     private:
+        struct _node;
         struct _sf_data;
         static void _shannon_fano(std::vector<struct _sf_data> &, uint8_t, uint8_t, double);
     };

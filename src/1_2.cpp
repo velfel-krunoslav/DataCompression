@@ -13,16 +13,27 @@
 
 int main(int argc, char *argv[])
 {
-    if (argc < 2)
+    if (argc < 3)
     {
         std::cout << "Filename not provided" << std::endl;
         return EXIT_FAILURE;
     }
 
-    const std::string filename(argv[1]);
+    const std::string filename(argv[2]);
 
-    comp::common::shannon_fano_encode(filename);
-
+    if (std::string(argv[1]) == "-d")
+    {
+        comp::common::shannon_fano_decode(filename);
+    }
+    else if (std::string(argv[1]) == "-e")
+    {
+        comp::common::shannon_fano_encode(filename);
+    }
+    else
+    {
+        std::cout << "Unknown option" << std::endl;
+        return EXIT_FAILURE;
+    }
 
     return EXIT_SUCCESS;
 }

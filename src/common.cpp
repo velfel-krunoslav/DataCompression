@@ -8,6 +8,8 @@
 #include <cmath>
 #include <algorithm>
 #include <vector>
+#include <memory>
+#include <iomanip>
 
 const std::string comp::common::sf_ext = ".sfef";
 
@@ -18,9 +20,191 @@ struct comp::common::_sf_data
     std::vector<bool> prefix;
 };
 
+/* Trie */
+/* Example: how two prefixes 001011 and 0011 are stored in the same trie: */
+
+/*
+ 0        false
+ 0        false
+ 1\       true\
+ 0 1  ->  false TRUE
+ 1        true
+ 1        TRUE
+
+ Leaf nodes are set in all-caps, and hold the corresponding byte.
+ */
+struct comp::common::_node
+{
+    std::map<bool, std::unique_ptr<struct comp::common::_node>> nodes;
+
+    bool ends = false;
+    uint8_t decoded_byte;
+
+    /* TODO: don't modify bits */
+    void insert(std::vector<bool> &bits, uint8_t byte)
+    {
+        // TODO: .empty()?
+        if (bits.size() == 0)
+        {
+            decoded_byte = byte;
+            ends = true;
+            return;
+        }
+
+        const bool next = bits[0];
+        bits.erase(bits.begin());
+
+        /* Insert if the bit does not exist: */
+        if (nodes.find(next) == nodes.end())
+        {
+            nodes[next] = std::make_unique<struct comp::common::_node>();
+        }
+        /* Recursively traverse and keep adding nodes where needed: */
+        nodes[next]->insert(bits, byte);
+    }
+
+    comp::common::_node *find(uint8_t byte, uint8_t &leftover_bits)
+    {
+        if ((leftover_bits == 0) || ends)
+        {
+            return this;
+        }
+
+        const bool next = (byte & (0x1 << (leftover_bits - 1))) ? true : false;
+        if (nodes.find(next) == nodes.end())
+        {
+            return nullptr;
+        }
+
+        leftover_bits--;
+        return nodes[next]->find(byte, leftover_bits);
+    }
+
+    static std::string byteToHex(uint8_t byte)
+    {
+        std::ostringstream oss;
+        oss << "0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+        return oss.str();
+    }
+
+    static void printTrie(const _node *node, const std::string &prefix = "")
+    {
+        if (!node)
+            return;
+
+        // Print current node details
+        std::cout << prefix;
+        if (node->ends)
+        {
+            std::cout << " [END] Decoded Byte: " << byteToHex(node->decoded_byte);
+        }
+        std::cout << std::endl;
+
+        // Recur for true and false branches
+        if (node->nodes.find(false) != node->nodes.end())
+        {
+            std::cout << prefix << "0 -> ";
+            printTrie(node->nodes.at(false).get(), prefix + "  ");
+        }
+
+        if (node->nodes.find(true) != node->nodes.end())
+        {
+            std::cout << prefix << "1 -> ";
+            printTrie(node->nodes.at(true).get(), prefix + "  ");
+        }
+    }
+};
+
+std::string trim_string_ext(const std::string& str) {
+    std::size_t lastDot = str.find_last_of('.');
+
+    if (lastDot != std::string::npos && lastDot != 0) {
+        return str.substr(0, lastDot);
+    }
+
+    return str;
+}
+
 void comp::common::shannon_fano_decode(const std::string &filename)
 {
-    
+    std::ifstream in(filename, std::ios::binary);
+    std::ofstream out(trim_string_ext(filename), std::ios::binary);
+    std::cout << trim_string_ext(filename) << std::endl;
+    // TODO auto
+    auto trie = std::make_unique<_node>();
+
+    uint8_t valid_bits;
+    uint8_t byte;
+
+    /* File header (prefixes): */
+    for (int i = 0; i < 256; i++)
+    {
+        in.read(reinterpret_cast<char *>(&valid_bits), sizeof valid_bits);
+
+        const bool excess_bits = (valid_bits % 8) > 0;
+        const uint8_t bytes_to_read = valid_bits / 8 + (excess_bits ? 1 : 0);
+
+        std::vector<bool> bits;
+        std::vector<uint8_t> bytes;
+
+        for (int j = 0; j < bytes_to_read; j++)
+        {
+            in.read(reinterpret_cast<char *>(&byte), sizeof byte);
+            bytes.push_back(byte);
+        }
+
+        uint8_t mask = 0x80;
+        for (int j = 0; j < valid_bits; j++)
+        {
+            bits.push_back((bytes[j / 8] & mask) ? true : false);
+            mask >>= 1;
+
+            if (mask == 0x0)
+            {
+                mask = 0x80;
+            }
+        }
+
+        /* printf("%5d: ", i);
+        for(int j = 0; j < bits.size(); j++) {
+            printf("%c", (bits[j]) ? '1' : '0');
+        }
+        printf("\n"); */
+        trie->insert(bits, static_cast<uint8_t>(i));
+
+    }
+
+    uint8_t leftover = 0;
+    _node *t = trie.get();
+
+    for (;;)
+    {
+        if (leftover == 0)
+        {
+            if (!(in.read(reinterpret_cast<char *>(&byte), sizeof byte)))
+            {
+                // TODO check excess (padded) bits handling at the end of the file
+                goto cleanup;
+            }
+            leftover = 8;
+        }
+
+        t = t->find(byte, leftover);
+        if (t == NULL)
+        {
+            std::cout << "Fatal error: " << __LINE__ << std::endl;
+        }
+
+        if (t->ends)
+        {
+            out.write(reinterpret_cast<char*>(&(t->decoded_byte)), sizeof t->decoded_byte);
+            t = trie.get();
+        }
+    }
+
+cleanup:
+    in.close();
+    out.close();
 }
 
 void comp::common::shannon_fano_encode(const std::string &filename)
@@ -68,15 +252,15 @@ void comp::common::shannon_fano_encode(const std::string &filename)
 
     std::sort(result.begin(), result.end(), std::less<std::pair<double, std::vector<bool>>>());
 
-    for (auto &t : result)
-    {
-        fprintf(stdout, "%5d: ", t.first);
-        for (int i = 0; i < t.second.size(); i++)
+    /*     for (auto &t : result)
         {
-            printf("%c", (t.second[i]) ? '1' : '0');
-        }
-        printf("\n");
-    }
+            fprintf(stdout, "%5d: ", t.first);
+            for (int i = 0; i < t.second.size(); i++)
+            {
+                printf("%c", (t.second[i]) ? '1' : '0');
+            }
+            printf("\n");
+        } */
 
     const std::string output_filename = filename + comp::common::sf_ext;
 
