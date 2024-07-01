@@ -45,12 +45,6 @@ struct comp::common::_node : public std::enable_shared_from_this<_node>
 
     std::map<bool, std::shared_ptr<struct comp::common::_node>> nodes;
 
-    _node()
-    {
-        nodes[false] = nullptr;
-        nodes[true] = nullptr;
-    }
-
     bool ends = false;
     std::any data;
 
@@ -58,7 +52,7 @@ struct comp::common::_node : public std::enable_shared_from_this<_node>
     std::shared_ptr<comp::common::_node> insert(std::vector<bool> &bits, std::any dat)
     {
         // TODO: .empty()?
-        if (bits.size() == 0)
+        if (bits.empty())
         {
             data = dat;
             ends = true;
@@ -71,7 +65,7 @@ struct comp::common::_node : public std::enable_shared_from_this<_node>
         /* Insert if the bit does not exist: */
         if (nodes.find(next) == nodes.end())
         {
-            nodes[next] = std::make_unique<struct comp::common::_node>();
+            nodes[next] = std::make_shared<struct comp::common::_node>();
         }
         /* Recursively traverse and keep adding nodes where needed: */
         return nodes[next]->insert(bits, dat);
@@ -110,15 +104,6 @@ std::string trim_string_ext(const std::string &str)
 void comp::common::_write_encoded(std::vector<std::pair<uint8_t, std::vector<bool>>> &result,
                                   const std::string &filename, const std::string &output_filename)
 {
-    for (auto &[byte, code] : result)
-    {
-        std::cout << static_cast<int>(byte) << ": ";
-        for (const auto &c : code)
-        {
-            std::cout << c;
-        }
-        std::cout << std::endl;
-    }
     std::ifstream in(filename, std::ios::binary);
     std::ofstream out(output_filename, std::ios::binary);
     /*
@@ -213,16 +198,14 @@ void comp::common::_write_encoded(std::vector<std::pair<uint8_t, std::vector<boo
 std::shared_ptr<comp::common::_node> comp::common::join_nodes(std::shared_ptr<comp::common::_node> left, std::shared_ptr<comp::common::_node> right)
 {
     auto tmp = std::make_shared<comp::common::_node>();
-    tmp->nodes[false] = left;
-    tmp->nodes[true] = right;
+    tmp->nodes[false] = right;
+    tmp->nodes[true] = left;
 
-    /*     auto left_prob = std::any_cast<std::pair<std::vector<uint8_t>, bool>>(tmp->nodes[false]->data).second;
-        auto right_prob = std::any_cast<std::pair<std::vector<uint8_t>, bool>>(tmp->nodes[true]->data).second;
+    /*     auto left_prob = std::any_cast<std::pair<std::vector<uint8_t>, double>>(left->data).second;
+        auto right_prob = std::any_cast<std::pair<std::vector<uint8_t>, double>>(right->data).second;
 
-        if(left_prob < right_prob) {
-            auto t = tmp->nodes[false];
-            tmp->nodes[false] = tmp->nodes[true];
-            tmp->nodes[true] = t;
+        if (right_prob < left_prob) {
+            std::swap(tmp->nodes[false], tmp->nodes[true]);
         } */
 
     return tmp;
@@ -239,10 +222,11 @@ void comp::common::_huffman_code_gen(std::shared_ptr<comp::common::_node> &node,
 
     prefix_buffer.push_back(false);
     _huffman_code_gen(node->nodes[false], prefix_buffer, prefixes);
-
     prefix_buffer.pop_back();
+
     prefix_buffer.push_back(true);
     _huffman_code_gen(node->nodes[true], prefix_buffer, prefixes);
+    prefix_buffer.pop_back();
 }
 
 void comp::common::huffman_encode(const std::string &filename)
@@ -257,7 +241,7 @@ void comp::common::huffman_encode(const std::string &filename)
             auto first = std::any_cast<std::pair<std::vector<uint8_t>, double>>(a->data);
             auto second = std::any_cast<std::pair<std::vector<uint8_t>, double>>(b->data);
 
-            return first.second < second.second;
+            return second.second < first.second;
         }
     } cmp;
 
@@ -270,15 +254,6 @@ void comp::common::huffman_encode(const std::string &filename)
         result.push(new_node);
     }
 
-    /* while (result.size())
-    {
-        auto pair = std::any_cast<std::pair<std::vector<uint8_t>, double>>(result.top()->data);
-
-        std::cout << static_cast<int>(std::any_cast<std::vector<uint8_t>>(pair.first)[0]) << std::endl;
-        std::cout << std::any_cast<double>(pair.second) << std::endl;
-        result.pop();
-    } */
-
     while (result.size() != 1)
     {
         std::shared_ptr<_node> data[2];
@@ -290,7 +265,7 @@ void comp::common::huffman_encode(const std::string &filename)
         }
 
         /* Flip order: */
-        auto new_node = comp::common::join_nodes(data[1], data[0]);
+        auto new_node = comp::common::join_nodes(data[0], data[1]);
 
         auto left_data = std::any_cast<std::pair<std::vector<uint8_t>, double>>(data[0]->data);
         auto right_data = std::any_cast<std::pair<std::vector<uint8_t>, double>>(data[1]->data);
@@ -312,21 +287,6 @@ void comp::common::huffman_encode(const std::string &filename)
 
     auto tree = std::make_shared<comp::common::_node>();
     _huffman_code_gen(root, buf, codes);
-    for (auto &[byte, code] : codes)
-    {
-
-        /*Remove leading zeroes:*/
-        while ((code.size() - 1) && code.front() != 1)
-        {
-            code.erase(code.begin());
-        }
-        std::cout << static_cast<int>(byte) << ": ";
-        for (const auto &c : code)
-        {
-            std::cout << c;
-        }
-        std::cout << std::endl;
-    }
 
     std::vector<std::pair<uint8_t, std::vector<bool>>> _result(codes.begin(), codes.end());
 
@@ -340,9 +300,8 @@ void comp::common::decode(const std::string &filename)
     // TODO what if the decoded filename already exists?
     std::ifstream in(filename, std::ios::binary);
     std::ofstream out(trim_string_ext(filename), std::ios::binary);
-    std::cout << trim_string_ext(filename) << std::endl;
     // TODO auto
-    auto trie = std::make_unique<_node>();
+    auto trie = std::make_shared<_node>();
 
     uint8_t valid_bits;
     uint8_t byte;
@@ -350,6 +309,7 @@ void comp::common::decode(const std::string &filename)
     /* File header (prefixes): */
     for (int i = 0; i < 256; i++)
     {
+
         in.read(reinterpret_cast<char *>(&valid_bits), sizeof valid_bits);
 
         const bool excess_bits = (valid_bits % 8) > 0;
@@ -375,21 +335,11 @@ void comp::common::decode(const std::string &filename)
                 mask = 0x80;
             }
         }
-
-        printf("%5d: ", i);
-        for (int j = 0; j < bits.size(); j++)
-        {
-            printf("%c", (bits[j]) ? '1' : '0');
-        }
-        printf("\n");
-        trie->insert(bits, static_cast<uint8_t>(i));
+        auto ptr = trie->insert(bits, static_cast<uint8_t>(i));
     }
 
-    uint8_t leftover = 0;
     _node *t = trie.get();
-
-    /* comp::common::_node::printTrie(t, ""); */
-
+    uint8_t leftover = 0;
     for (;;)
     {
         if (leftover == 0)
@@ -410,7 +360,8 @@ void comp::common::decode(const std::string &filename)
 
         if (t->ends)
         {
-            out.write(reinterpret_cast<char *>(&(t->data)), sizeof t->data);
+            auto decoded = std::any_cast<uint8_t>(t->data);
+            out.write(reinterpret_cast<char *>(&(decoded)), sizeof decoded);
             t = trie.get();
         }
     }
@@ -427,12 +378,6 @@ void comp::common::shannon_fano_encode(const std::string &filename)
     std::vector<std::pair<uint8_t, std::vector<bool>>> result;
 
     comp::common::calc_prob(filename, prob);
-
-    /*     for (auto &t : prob)
-        {
-            fprintf(stdout, "%5d: %f\n", t.first, t.second);
-            printf("\n");
-        } */
 
     /* Convert to a vector, for sorting: */
     std::vector<std::pair<uint8_t, double>> vec(prob.begin(), prob.end());
@@ -465,16 +410,6 @@ void comp::common::shannon_fano_encode(const std::string &filename)
 
     std::sort(result.begin(), result.end(), std::less<std::pair<double, std::vector<bool>>>());
 
-    /*     for (auto &t : result)
-        {
-            fprintf(stdout, "%5d: ", t.first);
-            for (int i = 0; i < t.second.size(); i++)
-            {
-                printf("%c", (t.second[i]) ? '1' : '0');
-            }
-            printf("\n");
-        } */
-
     const std::string output_filename = filename + comp::common::sf_ext;
 
     _write_encoded(result, filename, output_filename);
@@ -498,7 +433,6 @@ void comp::common::_shannon_fano(std::vector<struct _sf_data> &dat, uint8_t p, u
         lim++;
         sum += dat[lim].prob;
     }
-    //    std::cout << static_cast<int>(p) << " [" << static_cast<int>(lim) << "] " << static_cast<int>(q) << " | " << sum << std::endl;
 
     int i;
     for (i = p; i <= lim; i++)
