@@ -13,13 +13,14 @@ namespace comp
     class common
     {
     public:
+        static const std::string sf_ext;
+        static const std::string hf_ext;
+
         static void calc_prob(std::string, std::map<uint8_t, double> &);
         static void shannon_fano_encode(const std::string &);
         static void huffman_encode(const std::string &);
         static void decode(const std::string &);
-
-        static const std::string sf_ext;
-        static const std::string hf_ext;
+        static std::string trim_string_ext(const std::string &);
 
     private:
         struct _node;

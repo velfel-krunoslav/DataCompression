@@ -89,7 +89,7 @@ struct comp::common::_node : public std::enable_shared_from_this<_node>
     }
 };
 
-std::string trim_string_ext(const std::string &str)
+std::string  comp::common::trim_string_ext(const std::string &str)
 {
     std::size_t lastDot = str.find_last_of('.');
 
