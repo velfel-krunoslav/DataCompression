@@ -12,10 +12,10 @@ static_assert(SEARCH_BUF_SIZE + LOOKAHEAD_BUF_SIZE == 256, "Adjust buffer sizes"
 class Buffer
 {
 private:
-    const uint8_t maxbufsize;
     Buffer();
 
 public:
+    const uint8_t maxbufsize;
     std::unique_ptr<uint8_t[]> buf;
     uint8_t size = 0;
     uint8_t begin = 0;
@@ -40,12 +40,15 @@ public:
         size++;
     }
 
-    bool pop()
+    uint8_t pop()
     {
         if (size == 0)
         {
-            return false;
+            /* TODO: find a better solution */
+            return 0;
         }
+
+        uint8_t val = buf.get()[begin];
 
         if (begin == maxbufsize - 1)
         {
@@ -56,20 +59,12 @@ public:
             begin++;
         }
         size--;
-        return true;
+        return val;
     }
 
-    void print()
+    uint8_t at(uint8_t idx)
     {
-        uint16_t idx;
-        for (uint8_t i; i < size; i++)
-        {
-            idx = begin + i;
-            idx = idx % maxbufsize;
-
-            std::cout << static_cast<int>(buf.get()[idx]) << " ";
-        }
-        std::cout << std::endl;
+        return buf.get()[(begin + idx) % maxbufsize];
     }
 };
 
@@ -81,44 +76,97 @@ struct out
 
 void largest_repeating_sequence(Buffer &search, Buffer &lookahead, struct out &result)
 {
+    for (int i = 0; i < search.size; i++)
+    {
+        std::cout << search.at(i) << " ";
+    }
+    std::cout << "| ";
+
+    for (int i = 0; i < lookahead.size; i++)
+    {
+        std::cout << lookahead.at(i) << " ";
+    }
+    std::cout << std::endl;
     /* First try to find the largest substring from the lookahead buffer.
-     * i - length of the lookahead substring to find
+     * subsize - length of the lookahead substring to find
      */
-    for (int i = lookahead.size; i > 0; i--)
+    for (uint8_t subsize = lookahead.size - 1; subsize > 0; subsize--)
     {
         /* Start looking for the substring from the lowest position of the search buffer. */
-        for (int j = 0; j < search.size; j++)
+        for (int i = search.size - 1; i >= 0; i--)
         {
             bool matching = true;
-            int k = 0, l = 0;
+            int j = i;
 
             /* Search starting from the search buffer... */
-            for(; matching && k <= j; j++) {
-                matching = matching && (search.buf.get()[k] == lookahead.buf.get()[k]);
+            for (; matching && j < search.size; j++)
+            {
+                matching = matching && (search.at(j) == lookahead.at(j - i));
             }
-
-            l = k;
 
             /* ...and into the lookahead buffer if possible: */
-            for(; matching && k < i; k++) {
-                matching = matching && (search.buf.get()[k - l] == lookahead.buf.get()[k]);
+            for (j = 0; matching && j < subsize - (search.size - i); j++)
+            {
+                matching = matching && (lookahead.at(j) == lookahead.at(j + (search.size - i)));
             }
 
-            if(matching)
+            /* Largest repeating sequence, possibly spanning into the lookahead buffer, has been found: */
+            if (matching)
+            {
+                result = {.bytes = {static_cast<uint8_t>(i), subsize, lookahead.at(subsize)}};
+                printf("<%d, %d, %c>\n\n", result.bytes[0], result.bytes[1], result.bytes[2]);
+                return;
+            }
         }
     }
+    /* Otherwise, a unique byte has been encountered, add it to the search buffer.
+     *
+     * Additionally, this case is triggered if all the remaining bytes in the lookahead buffer form
+     * a substring somewhere in the search buffer. Example:
+     * 
+     *       SEARCH                LOOKAHEAD
+     * 
+     * a0, a1, a2, a3, ..., an | a1, a2, a3, eof
+     * 
+     * a1, a2 will be caught by the nested loops above, whereas a3 will be re-added as if was a distinct search buffer byte.
+     * This does weaken the compression ratio, but by a negligible amount.
+     */
+    result = {.bytes = {0, 0, lookahead.at(0)}};
+    printf("<%d, %d, %c>\n\n", result.bytes[0], result.bytes[1], result.bytes[2]);
 }
 
 int main(void)
 {
-    Buffer search(SEARCH_BUF_SIZE); //, lookahead(LOOKAHEAD_BUF_SIZE)
+    Buffer search(4), lookahead(4);
 
-    uint8_t val[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    uint8_t val[] = {'A', 'B', 'A', 'B', 'C', 'B', 'C', 'B', 'A', 'A', 'B', 'C', 'A', 'B', 'B'};
 
-    for (uint16_t i = 0; i < 300; i++)
+    uint16_t i;
+    for (i = 0; i < 4; i++)
     {
-        search.push(val[i % 10]);
-        search.print();
+        lookahead.push(val[i % 10]);
+    }
+
+    while (lookahead.size)
+    {
+        struct out result;
+
+        largest_repeating_sequence(search, lookahead, result);
+
+        uint8_t len = result.bytes[1];
+
+        len++;
+
+        for (int j = 0; j < len; j++)
+        {
+            auto pop = lookahead.pop();
+            if (i < (sizeof(val) / sizeof(val[0])))
+            {
+                lookahead.push(val[i]);
+                i++;
+            }
+            search.push(pop);
+        }
     }
 
     return EXIT_SUCCESS;
