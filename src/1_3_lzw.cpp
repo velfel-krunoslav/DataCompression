@@ -1,35 +1,149 @@
+/*  CHECK .XLSX and examine why is the dictionary not getting filled to its maximum.
+    Could count++ be the culprit?
+
+    Also, test variable dictionary word size.
+ */
+
 #include <iostream>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <vector>
 #include <fstream>
+#include <unordered_map>
 
 #include "common.hpp"
+
+/* Helper function to write bits to an output stream when the bit count not divisible by 8: */
+inline void write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t valid_bits)
+{
+    byte <<= (32 - valid_bits);
+
+    for (uint32_t t = 0x1 << 31; valid_bits; t >>= 1, valid_bits--)
+    {
+        if (buf_size >= 8)
+        {
+            // printf("%02X ", buf);
+            char q = buf;
+            out.push_back(q);
+            buf = 0;
+            buf_size = 0;
+        }
+        buf = buf | (((byte & t) ? 0x80 : 0) >> buf_size);
+        buf_size++;
+    }
+}
 
 /* Prefix tree (dictionary): */
 struct node
 {
-    static const size_t bsize = 256;
+    static const size_t maxbytes = 256;
+    size_t count = 0;
+    std::unordered_map<uint8_t, std::pair<struct node *, size_t>> bytes;
 
-    uint16_t i;
-    struct node *bytes[bsize];
+    struct node *parent = nullptr;
 
-    node(uint16_t idx) : i(idx)
+    bool push(uint8_t byte, size_t i)
     {
-        for (int i = 0; i < bsize; i++)
+        if (count == maxbytes)
         {
-            bytes[i] = nullptr;
+            return false;
         }
+
+        if (bytes.find(byte) != bytes.end())
+        {
+            return false;
+        }
+        bytes[byte] = std::make_pair(nullptr, i);
+        count++;
+        return true;
     }
 
     ~node()
     {
-        for (int i = 0; i < bsize; i++)
+        for (auto &[byte, pair] : bytes)
         {
-            if (bytes[i])
+            if (pair.first)
             {
-                delete bytes[i];
+                delete pair.first;
+            }
+        }
+    }
+
+    void get_tree_stats(std::vector<size_t> &depths, size_t depth = 0)
+    {
+        for (auto &[byte, pair] : bytes)
+        {
+            if (pair.first)
+            {
+                pair.first->get_tree_stats(depths, depth + 1);
+            }
+        }
+
+        if (bytes.size() == 0)
+        {
+            depths.push_back(depth);
+        }
+    }
+
+    /* Serialize the dictionary (i.e. the trie). Performed breadth-first.
+     *
+     * There are two distinct serialization methods:
+     *     0. For every child (that is, `bytes[idx]`) write only the `i` that the child points to:
+     *                                                      `bytes[idx]->i`.
+     *
+     *        If a child (bytes[idx]) is nullptr, simply write 0x0.
+     *
+     *     1. Consider only the node's non-nullptr children. First write the the respective index of the child, followed by the `i` the child points to:
+     *                                                   `idx | bytes[idx]->i`.
+     *        End the serialization with 0x0.
+     *
+     * Method 0) offers better space utilization when the tree grows horizontally. If the tree at some point branches out, method 1) may be a better choice.
+     * To differentiate between these two methods, before any data is serialized, first a single bit is written (with `0` denoting method 0, and `1` denoting method 1).
+     *
+     * `size_bits` is the least number of bits required to write the index `i` and depends on the total number of entries in the dictionary.
+     * The `flush()` funciton is equipped to properly handle the scenario when this number is not divisible by 8, and compacts the bits, in series, without wasting any space.
+     */
+    void flush(std::vector<char> &out, uint8_t &buf, size_t &buf_size, size_t size_bits)
+    {
+        size_t mode = 0x0;
+
+        auto nullcount = maxbytes - bytes.size();
+
+        /* TODO: there may be a beter cutoff limit than (bsize / 2), which may improve the compression ratio even further: */
+        if (nullcount > (maxbytes / 2))
+        {
+            mode = 0x1;
+        }
+
+        write_stream(out, buf, buf_size, mode, 1);
+
+        for (size_t idx = 0; idx < maxbytes; idx++)
+        {
+            if (bytes.find(idx) != bytes.end())
+            {
+                if (mode == 0x1)
+                {
+                    write_stream(out, buf, buf_size, idx, size_bits);
+                }
+                write_stream(out, buf, buf_size, bytes[idx].second, size_bits);
+            }
+            else if (mode == 0x0)
+            {
+                write_stream(out, buf, buf_size, 0x0, size_bits);
+            }
+        }
+
+        if (mode == 0x1)
+        {
+            write_stream(out, buf, buf_size, 0x0, 1);
+        }
+
+        for (auto [byte, pair] : bytes)
+        {
+            if (pair.first)
+            {
+                pair.first->flush(out, buf, buf_size, size_bits);
             }
         }
     }
@@ -42,13 +156,17 @@ public:
     /* Dictionary size:
      * https://jrsoftware.org/ishelp/index.php?topic=setup_lzmadictionarysize
      */
-    const size_t maxsize = 0xFFFFFF;
+    /* 0xFFFFF max recommended, consumes 2GB RAM (stale info, test again) */
+    const size_t maxsize = 0xFFFFF;
     size_t count;
 
-    Dictionary() : root(new struct node(0)), count(0)
+    Dictionary()
     {
+        root = new struct node();
+        count = 0;
+
         /* Populate the dictionary with bytes 0, ..., 255 ahead of time: */
-        for (uint16_t idx = 0; idx < node::bsize; idx++)
+        for (size_t idx = 0; idx < node::maxbytes; idx++)
         {
             try_insert(root, idx);
         }
@@ -59,41 +177,30 @@ public:
         delete root;
     }
 
-    bool try_insert(struct node *n, uint8_t byte)
+    size_t called = 0;
+
+    size_t try_insert(struct node *n, uint8_t byte)
     {
         if (count == maxsize || n == nullptr)
         {
             return false;
         }
 
-        if (n->bytes[byte])
-        {
-            return false;
-        }
-        n->bytes[byte] = new struct node(count);
         count++;
-        return true;
+        auto inserted = n->push(byte, count);
+
+        if(inserted) {
+            called++;
+        }
+
+        if (!inserted)
+        {
+            count--;
+        }
+
+        return n->bytes[byte].second;
     }
 };
-
-/* Helper function to write bits to an output stream when the bit count not divisible by 8: */
-inline void write_stream(std::ofstream &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t valid_bits)
-{
-    byte <<= (32 - valid_bits);
-
-    for (uint32_t t = 0x1 << 31; valid_bits; t >>= 1, valid_bits--)
-    {
-        if (buf_size >= 8)
-        {
-            //printf("%02X ", buf);
-            out.write(reinterpret_cast<char *>(&buf), sizeof(buf));
-            buf = 0;
-            buf_size = 0;
-        }
-        buf = buf | (((byte & t) ? 0x80 : 0) >> buf_size);
-        buf_size++;
-    }
-}
 
 int main(int argc, char *argv[])
 {
@@ -137,41 +244,68 @@ int main(int argc, char *argv[])
             size >>= 1;
         }
 
+        out.write(reinterpret_cast<char *>(&valid_bits), sizeof(valid_bits));
+
         uint8_t byte;
         uint8_t buf = 0;
         size_t buf_size = 0;
 
+        std::vector<char> outbuf;
+
         struct node *t = dict.root;
+
         while (in.read(reinterpret_cast<char *>(&byte), sizeof(byte)))
         {
-            auto is_new = dict.try_insert(t, byte);
-
-            if (is_new)
+            auto res = dict.try_insert(t, byte);
+            std::cout << res << " ";
+            if (res)
             {
-                auto idx = t->bytes[byte]->i;
-                // printf("%8d | %08X\n", idx, byte);
+                /* This byte/sequence of bytes has never been encountered and has just been added
+                 * as there is enough space in the dictionary. Write its index in the compressed file:
+                 */
 
-                write_stream(out, buf, buf_size, idx, valid_bits);
+                auto idx = t->bytes[byte].second;
+
+                write_stream(outbuf, buf, buf_size, idx, valid_bits);
                 t = dict.root;
             }
             else
             {
-                if (t->bytes[byte] == nullptr)
+                /* Insertion may have failed because the dictionary has no space left: */
+                if (dict.count == dict.maxsize)
                 {
-                    /* Out of space, keep adding bytes anyway: */
+                    /* First handle the traversed substring from the dictionary:  */
                     if (t != dict.root)
                     {
-                        auto idx = t->i;
-                        write_stream(out, buf, buf_size, idx, valid_bits);
-                    }
-                    auto idx = byte;
-                    write_stream(out, buf, buf_size, idx, valid_bits);
 
+                        auto prev = t->parent->bytes;
+
+                        size_t prev_idx = 0;
+                        for (auto it = prev.begin(); it != prev.end(); it++)
+                        {
+                            if (it->second.first == t)
+                            {
+                                prev_idx = it->second.second;
+                            }
+                        }
+                        write_stream(outbuf, buf, buf_size, prev_idx, valid_bits);
+                    }
+                    /* ...then separately output the byte in question without adding a new entry to the dictionary. */
+                    write_stream(outbuf, buf, buf_size, byte, valid_bits);
                     t = dict.root;
                 }
                 else
                 {
-                    t = t->bytes[byte];
+                    std::cout << "ENTER" << std::endl;
+                    if (t->bytes[byte].first == nullptr)
+                    {
+
+                        auto parent = t;
+                        t = new struct node();
+                        t->parent = parent;
+                    }
+
+                    t = t->bytes[byte].first;
                 }
             }
         }
@@ -179,14 +313,58 @@ int main(int argc, char *argv[])
         if (t != dict.root)
         {
             /* TODO: is this necessary? Test and prove it. */
+            /* TODO: code duplication */
             /* Byte stream ends on a byte sequence that is in the dictionary */
             /* Leftover: */
-            auto idx = t->i;
-            write_stream(out, buf, buf_size, idx, valid_bits);
+
+            auto prev = t->parent->bytes;
+
+            size_t prev_idx = 0;
+            for (auto it = prev.begin(); it != prev.end(); it++)
+            {
+                if (it->second.first == t)
+                {
+                    prev_idx = it->second.second;
+                }
+            }
+            write_stream(outbuf, buf, buf_size, prev_idx, valid_bits);
         }
 
-        std::cout << std::endl << "Valid bits:" << static_cast<int>(valid_bits) << std::endl;
-        std::cout << std::endl << "Dict count:" << dict.count << std::endl;
+        /* Write encoded bytes to the file: */
+        out.write(outbuf.data(), outbuf.size());
+
+        /* Write the dictionary contents in a separate file: */
+        std::ofstream dictfile(std::to_string(dict.maxsize) + ".dict", std::ios::binary);
+
+        std::vector<char> dictout;
+        uint8_t dictoutbuf = 0;
+        size_t dictout_bufsize = 0;
+
+        dict.root->flush(dictout, dictoutbuf, dictout_bufsize, valid_bits);
+
+        dictfile.write(dictout.data(), dictout.size());
+
+        dictfile.close();
+
+        std::cout << "Valid bits:" << static_cast<int>(valid_bits) << std::endl;
+        std::cout << "Dict maxsize:" << dict.maxsize << std::endl;
+        std::cout << "Dict count:" << dict.count << std::endl;
+        std::cout << "Called:" << dict.called << std::endl;
+
+        std::vector<size_t> depths;
+        dict.root->get_tree_stats(depths);
+
+        std::ofstream csv(filename + ".depths_" + std::to_string(dict.maxsize) + ".csv");
+
+        csv << dict.maxsize << std::endl;
+
+        for (int i = 0; i < depths.size(); i++)
+        {
+            csv << static_cast<long>(depths[i]) << std::endl;
+        }
+        std::cout << std::endl;
+
+        csv.close();
 
         in.close();
         out.close();
