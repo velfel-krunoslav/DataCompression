@@ -1,207 +1,200 @@
+/*  CHECK .XLSX and examine why is the dictionary not getting filled to its maximum.
+    Could count++ be the culprit?
+
+    Also, test variable dictionary word size.
+ */
+
 #include <iostream>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <vector>
 #include <fstream>
-#include <string>
+#include <unordered_map>
+#include <map>
 
 #include "common.hpp"
 
-class Buffer
+/* TODO: check inline
+ * Helper function to write bits to an output stream when the bit count not divisible by 8: */
+inline void write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t valid_bits)
+{
+    byte <<= (32 - valid_bits);
+
+    for (uint32_t t = 0x1 << 31; valid_bits; t >>= 1, valid_bits--)
+    {
+        if (buf_size >= 8)
+        {
+            // printf("%02X ", buf);
+            char q = buf;
+            out.push_back(q);
+            buf = 0;
+            buf_size = 0;
+        }
+        buf = buf | (((byte & t) ? 0x80 : 0) >> buf_size);
+        buf_size++;
+    }
+}
+
+/* Prefix tree (dictionary): */
+struct node
+{
+    static const size_t maxbytes = 256;
+    size_t count = 0;
+    std::unordered_map<uint8_t, std::pair<struct node *, size_t>> bytes;
+
+    struct node *parent = nullptr;
+
+    bool push(uint8_t byte, size_t i)
+    {
+        if (count == maxbytes)
+        {
+            return false;
+        }
+
+        if (bytes.find(byte) == bytes.end())
+        {
+            bytes[byte] = std::make_pair(nullptr, i);
+            count++;
+
+            return true;
+        }
+
+        return false;
+    }
+
+    ~node()
+    {
+        for (auto &[byte, pair] : bytes)
+        {
+            if (pair.first)
+            {
+                delete pair.first;
+            }
+        }
+    }
+
+    void flush(std::vector<char> &out, uint8_t &buf, size_t &buf_size, size_t size_bits)
+    {
+        size_t mode = 0x0;
+
+        auto nullcount = maxbytes - bytes.size();
+
+        /* TODO: there may be a beter cutoff limit than (bsize / 2), which may improve the compression ratio even further: */
+        if (nullcount > (maxbytes / 2))
+        {
+            mode = 0x1;
+        }
+
+        write_stream(out, buf, buf_size, mode, 1);
+
+        for (size_t idx = 0; idx < maxbytes; idx++)
+        {
+            if (bytes.find(idx) != bytes.end())
+            {
+                if (mode == 0x1)
+                {
+                    write_stream(out, buf, buf_size, idx, size_bits);
+                }
+                write_stream(out, buf, buf_size, bytes[idx].second, size_bits);
+            }
+            else if (mode == 0x0)
+            {
+                write_stream(out, buf, buf_size, 0x0, size_bits);
+            }
+        }
+
+        if (mode == 0x1)
+        {
+            write_stream(out, buf, buf_size, 0x0, 1);
+        }
+
+        for (auto [byte, pair] : bytes)
+        {
+            if (pair.first)
+            {
+                pair.first->flush(out, buf, buf_size, size_bits);
+            }
+        }
+    }
+};
+
+class Dictionary
 {
 public:
-    const uint8_t maxbufsize;
-    std::unique_ptr<uint8_t[]> buf;
-    uint8_t size = 0;
-    uint8_t begin = 0;
+    struct node *root;
+    /* Dictionary size:
+     * https://jrsoftware.org/ishelp/index.php?topic=setup_lzmadictionarysize
+     */
+    /* 0xFFFFF max recommended, consumes 2GB RAM (stale info, test again) */
+    const size_t maxsize = 0xFFFFF;
+    size_t count;
 
-    Buffer(uint8_t sz) : maxbufsize(sz), buf(std::make_unique<uint8_t[]>(sz)) {}
-
-    inline void push(uint8_t byte)
+    Dictionary()
     {
-        if (size == maxbufsize)
+        root = new struct node();
+        count = 0;
+
+        /* Populate the dictionary with bytes 0, ..., 255 ahead of time: */
+        for (size_t idx = 0; idx < node::maxbytes; idx++)
         {
-            pop();
+            try_insert(root, idx);
+        }
+    }
+
+    ~Dictionary()
+    {
+        delete root;
+    }
+
+    bool try_insert(struct node *n, uint8_t byte)
+    {
+        if (count == maxsize || n == nullptr)
+        {
+
+            return false;
         }
 
-        uint8_t idx = (begin + size) % maxbufsize;
-        buf[idx] = byte;
-        size++;
-    }
-
-    inline uint8_t pop()
-    {
-        if (size == 0)
+        if (n->bytes.find(byte) != n->bytes.end())
         {
-            return 0; // Consider handling this case differently
-        }
-
-        uint8_t val = buf[begin];
-        begin = (begin + 1) % maxbufsize;
-        size--;
-        return val;
-    }
-
-    inline uint8_t at(uint8_t idx) const
-    {
-        return buf[(begin + idx) % maxbufsize];
-    }
-};
-
-struct out
-{
-    uint8_t bytes[3];
-};
-
-void largest_repeating_sequence(Buffer &search, Buffer &lookahead, struct out &result)
-{
-    for (uint8_t subsize = lookahead.size - 1; subsize > 0; subsize--)
-    {
-        for (int i = search.size - 1; i >= 0; i--)
-        {
-            bool matching = true;
-            for (int j = 0; matching && j < subsize; j++)
+            if (n->bytes[byte].first)
             {
-                uint8_t searchIdx = (i + j) % search.maxbufsize;
-                uint8_t lookaheadIdx = j % lookahead.maxbufsize;
-                matching = (search.at(searchIdx) == lookahead.at(lookaheadIdx));
-            }
 
-            if (matching)
-            {
-                result = {.bytes = {static_cast<uint8_t>(i), subsize, lookahead.at(subsize)}};
-                return;
+                return false;
             }
         }
+
+        count++;
+        auto inserted = n->push(byte, count);
+
+        if (!inserted)
+        {
+            count--;
+        }
+
+        return inserted;
     }
-    result = {.bytes = {0, 0, lookahead.at(0)}};
-}
+};
 
 int main(int argc, char *argv[])
 {
-    if (argc < 3)
-    {
-        std::cout << "Usage: {-e|-d} <filename>" << std::endl;
-        return EXIT_FAILURE;
-    }
+    Dictionary dict;
 
-    const std::string mode(argv[1]);
-    const std::string filename(argv[2]);
-    const std::string extension(".lz77");
+    auto t = dict.root;
 
-    if (mode == "-e")
-    {
-        const int search_buffer_size = 64;
-        const int lookahead_buffer_size = 64;
-        const std::string out_filename = filename + extension;
+    t->bytes[0].first = new struct node;
+    t->bytes[0].first->parent = t;
+    
+    std::cout << dict.try_insert(t->bytes[0].first, 0x95) << std::endl;
+    /*
+    t = t->bytes[0x95].first;
+    dict.try_insert(t, 0x96);
 
-        static_assert(search_buffer_size + lookahead_buffer_size <= 256, "Adjust buffer sizes");
+    dict.try_insert(t, 1);
+    dict.try_insert(t, 2);
+    dict.try_insert(t, 3); */
 
-        Buffer search(search_buffer_size), lookahead(lookahead_buffer_size);
-
-        std::ifstream in(filename, std::ios::binary);
-        std::ofstream out(out_filename, std::ios::binary);
-
-        if (!in)
-        {
-            std::cerr << "Error opening file " << filename << std::endl;
-            return EXIT_FAILURE;
-        }
-        if (!out)
-        {
-            std::cerr << "Error opening file " << out_filename << std::endl;
-            return EXIT_FAILURE;
-        }
-
-        uint8_t byte;
-        while (in.read(reinterpret_cast<char *>(&byte), sizeof(byte)) && lookahead.size < lookahead_buffer_size)
-        {
-            lookahead.push(byte);
-        }
-
-        out.write(reinterpret_cast<const char *>(&search_buffer_size), sizeof(search_buffer_size));
-        out.write(reinterpret_cast<const char *>(&lookahead_buffer_size), sizeof(lookahead_buffer_size));
-
-        while (lookahead.size)
-        {
-            struct out result;
-            largest_repeating_sequence(search, lookahead, result);
-
-            for (uint8_t b : result.bytes)
-            {
-                out.write(reinterpret_cast<char *>(&b), sizeof(b));
-            }
-
-            uint8_t len = result.bytes[1] + 1;
-
-            for (uint8_t j = 0; j < len; j++)
-            {
-                uint8_t popped = lookahead.pop();
-                search.push(popped);
-
-                if (in.read(reinterpret_cast<char *>(&byte), sizeof(byte)))
-                {
-                    lookahead.push(byte);
-                }
-            }
-        }
-
-        in.close();
-        out.close();
-    }
-    else if (mode == "-d")
-    {
-        const std::string out_filename = comp::common::trim_string_ext(filename);
-
-        std::ifstream in(filename, std::ios::binary);
-        std::ofstream out(out_filename, std::ios::binary);
-
-        if (!in)
-        {
-            std::cerr << "Error opening file " << filename << std::endl;
-            return EXIT_FAILURE;
-        }
-        if (!out)
-        {
-            std::cerr << "Error opening file " << out_filename << std::endl;
-            return EXIT_FAILURE;
-        }
-
-        uint8_t search_buffer_size;
-        uint8_t lookahead_buffer_size;
-
-        in.read(reinterpret_cast<char *>(&search_buffer_size), sizeof(search_buffer_size));
-        in.read(reinterpret_cast<char *>(&lookahead_buffer_size), sizeof(lookahead_buffer_size));
-
-        struct out t;
-        std::vector<uint8_t> decoded;
-
-        while (in.read(reinterpret_cast<char *>(&t.bytes), sizeof(t.bytes)))
-        {
-            if (t.bytes[1])
-            {
-                int index_shift = decoded.size() - search_buffer_size;
-                index_shift = std::max(index_shift, 0);
-
-                for (int i = 0; i < t.bytes[1]; i++)
-                {
-                    decoded.push_back(decoded[index_shift + t.bytes[0] + i]);
-                }
-            }
-            decoded.push_back(t.bytes[2]);
-        }
-
-        out.write(reinterpret_cast<const char *>(decoded.data()), decoded.size());
-
-        in.close();
-        out.close();
-    }
-    else
-    {
-        std::cout << "Usage: {-e|-d} <filename>" << std::endl;
-        return EXIT_FAILURE;
-    }
+    dict.root->print();
 
     return EXIT_SUCCESS;
 }

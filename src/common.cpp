@@ -89,7 +89,7 @@ struct comp::common::_node : public std::enable_shared_from_this<_node>
     }
 };
 
-std::string  comp::common::trim_string_ext(const std::string &str)
+std::string comp::common::trim_string_ext(const std::string &str)
 {
     std::size_t lastDot = str.find_last_of('.');
 
@@ -475,4 +475,39 @@ void comp::common::calc_prob(std::string filename, std::map<uint8_t, double> &pr
     {
         prob[byte] = static_cast<double>(count) / total;
     }
+}
+
+comp::Buffer::Buffer(uint8_t sz) : maxbufsize(sz), buf(std::make_unique<uint8_t[]>(sz)) {}
+
+void comp::Buffer::push(uint8_t byte)
+{
+    if (size == maxbufsize)
+    {
+        /* If full, make space by deleting the least recently added: */
+        pop();
+    }
+
+    auto idx = (begin + size) % maxbufsize;
+    buf[idx] = byte;
+    size++;
+}
+
+uint8_t comp::Buffer::pop()
+{
+    if (size == 0)
+    {
+        /* TODO: find a better solution */
+        return 0;
+    }
+
+    uint8_t val = buf[begin];
+
+    begin = (begin + 1) % maxbufsize;
+    size--;
+    return val;
+}
+
+uint8_t comp::Buffer::at(uint8_t idx)
+{
+    return buf[(begin + idx) % maxbufsize];
 }

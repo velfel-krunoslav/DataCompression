@@ -349,8 +349,6 @@ int main(int argc, char *argv[])
             size >>= 1;
         }
 
-        out.write(reinterpret_cast<char *>(&word_width), sizeof(word_width));
-
         uint8_t byte;
         uint8_t buf = 0;
         size_t buf_size = 0;
@@ -412,9 +410,6 @@ int main(int argc, char *argv[])
             write_stream(outbuf, buf, buf_size, prev_idx, word_width);
         }
 
-        /* Write encoded bytes to the file: */
-        out.write(outbuf.data(), outbuf.size());
-
         std::vector<char> dictout;
         uint8_t dictoutbuf = 0;
         size_t dictout_bufsize = 0;
@@ -423,13 +418,27 @@ int main(int argc, char *argv[])
         dict.root->flush(dictout, dictoutbuf, dictout_bufsize, word_width);
 
         /* And the size of the dictionary itself: */
-        auto dictout_size = dict.count;
+        auto dictout_size = dictout.size();
+        printf("%d\n", dictout_size);
         for (int i = 0; i < sizeof(size_t); i++)
         {
-            dictout.insert(dictout.begin(), (dictout_size >> (8 * i)) & 0xFF);
+            uint8_t outbyte = (dictout_size >> (8 * i)) & 0xFF;
+            out.write(reinterpret_cast<char *>(&outbyte), sizeof(outbyte));
         }
 
         out.write(dictout.data(), dictout.size());
+
+        out.write(reinterpret_cast<char *>(&word_width), sizeof(word_width));
+        // printf("%2X,%2X,%2X,%2X\n", dictout[0], dictout[1], dictout[2], dictout[3]);
+
+        /* Write encoded bytes to the file: */
+        out.write(outbuf.data(), outbuf.size());
+
+        /*         printf("%2X,%2X,%2X,%2X\n", outbuf[0], outbuf[1], outbuf[2], outbuf[3]);
+
+                printf("...DICT END\n");
+                printf("%2X,%2X,%2X,%2X\n", dictout[dictout.size() - 4], dictout[dictout.size() - 3], dictout[dictout.size() - 2], dictout[dictout.size() - 1]);
+                printf("ENCODED START...\n"); */
 
         std::cout << "Word width:" << static_cast<int>(word_width) << std::endl;
         std::cout << "Dict maxsize:" << dict.maxsize << std::endl;
@@ -458,35 +467,65 @@ int main(int argc, char *argv[])
         const std::string out_filename = comp::common::trim_string_ext(filename);
 
         std::ifstream in(filename, std::ios::binary);
-        std::ofstream out(out_filename, std::ios::binary);
+        // std::ofstream out(out_filename, std::ios::binary);
 
         if (!in)
         {
             std::cerr << "Error opening file " << filename << std::endl;
             return EXIT_FAILURE;
         }
-        if (!out)
+        /* if (!out)
         {
             std::cerr << "Error opening file " << out_filename << std::endl;
             return EXIT_FAILURE;
-        }
+        } */
 
         std::vector<uint8_t> decoded;
 
-        size_t dict_count = 0;
+        uint8_t byte;
 
-        for (int i = 0; i < sizeof(size_t); ++i)
+        size_t dict_bytecount = 0;
+
+        for (int i = 0; i < sizeof(size_t); i++)
         {
-            uint8_t byte;
             in.read(reinterpret_cast<char *>(&byte), sizeof(byte));
-            dict_count |= (static_cast<size_t>(byte) << (8 * i));
+            dict_bytecount |= (static_cast<size_t>(byte) << (8 * i));
         }
 
+        printf("Dict byte size: %d\n", dict_bytecount);
+
+        std::vector<uint8_t> inbuf;
+
+        for (int i = 0; i < dict_bytecount; i++)
+        {
+            in.read(reinterpret_cast<char *>(&byte), sizeof(byte));
+            inbuf.push_back(byte);
+        }
+
+        uint8_t *start_dict = inbuf.data();
+        uint8_t *end_dict = inbuf.data() + (inbuf.size() - 1);
+
+        uint8_t word_width;
+        in.read(reinterpret_cast<char *>(&word_width), sizeof(word_width));
+
+        uint8_t *start_encoded = end_dict + 1;
+
+        while (in.read(reinterpret_cast<char *>(&byte), sizeof(byte)))
+        {
+            inbuf.push_back(byte);
+        }
+
+        uint8_t *end_encoded = inbuf.data() + (inbuf.size() - 1);
+
+        /*         printf("Word width: %d\n", word_width);
+                printf("%2X,%2X,%2X,%2X\n", *(end_dict-3), *(end_dict-2), *(end_dict-1), *(end_dict));
+                printf("%2X,%2X,%2X,%2X\n", start_encoded[0], start_encoded[1], start_encoded[2], start_encoded[3]);
+         */
         /* Dump contents: */
-        out.write(reinterpret_cast<const char *>(decoded.data()), decoded.size());
+        // out.write(reinterpret_cast<const char *>(decoded.data()), decoded.size());
 
         in.close();
-        out.close();
+        // out.close();
     }
     else
     {

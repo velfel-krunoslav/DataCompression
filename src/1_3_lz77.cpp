@@ -7,61 +7,13 @@
 
 #include "common.hpp"
 
-class Buffer
-{
-private:
-    Buffer();
-
-public:
-    const uint8_t maxbufsize;
-    std::unique_ptr<uint8_t[]> buf;
-    uint8_t size = 0;
-    uint8_t begin = 0;
-
-    Buffer(uint8_t sz) : maxbufsize(sz), buf(std::make_unique<uint8_t[]>(sz)) {}
-
-    inline void push(uint8_t byte)
-    {
-        if (size == maxbufsize)
-        {
-            /* If full, make space by deleting the least recently added: */
-            pop();
-
-        }
-
-        auto idx = (begin + size) % maxbufsize;
-        buf[idx] = byte;
-        size++;
-    }
-
-    inline uint8_t pop()
-    {
-        if (size == 0)
-        {
-            /* TODO: find a better solution */
-            return 0;
-        }
-
-        uint8_t val = buf[begin];
-
-        begin = (begin + 1) % maxbufsize;
-        size--;
-        return val;
-    }
-
-    inline uint8_t at(uint8_t idx)
-    {
-        return buf[(begin + idx) % maxbufsize];
-    }
-};
-
 struct out
 {
     /* {start_position, len, byte} */
     uint8_t bytes[3];
 };
 
-void largest_repeating_sequence(Buffer &search, Buffer &lookahead, struct out &result)
+void largest_repeating_sequence(comp::Buffer &search, comp::Buffer &lookahead, struct out &result)
 {
     /*     for (int i = 0; i < search.size; i++)
         {
@@ -75,30 +27,30 @@ void largest_repeating_sequence(Buffer &search, Buffer &lookahead, struct out &r
         }
         std::cout << std::endl; */
 
-    /* First try to find the largest substring from the lookahead buffer.
+    /* First try to find the largest substring from the lookahead comp::Buffer.
      * subsize - length of the lookahead substring to find
      */
     for (uint8_t subsize = lookahead.size - 1; subsize > 0; subsize--)
     {
-        /* Start looking for the substring from the lowest position of the search buffer. */
+        /* Start looking for the substring from the lowest position of the search comp::Buffer. */
         for (int i = search.size - 1; i >= 0; i--)
         {
             bool matching = true;
             int j;
 
-            /* Search starting from the search buffer... */
+            /* Search starting from the search comp::Buffer... */
             for (j = i; matching && j < search.size && j < i + subsize; j++)
             {
                 matching = (search.at(j) == lookahead.at(j - i));
             }
 
-            /* ...and into the lookahead buffer if possible: */
+            /* ...and into the lookahead comp::Buffer if possible: */
             for (j = 0; matching && j < i + subsize - search.size; j++)
             {
                 matching = (lookahead.at(j) == lookahead.at(j + (search.size - i)));
             }
 
-            /* Largest repeating sequence, possibly spanning into the lookahead buffer, has been found: */
+            /* Largest repeating sequence, possibly spanning into the lookahead comp::Buffer, has been found: */
             if (matching)
             {
                 result = {.bytes = {static_cast<uint8_t>(i), subsize, lookahead.at(subsize)}};
@@ -106,17 +58,17 @@ void largest_repeating_sequence(Buffer &search, Buffer &lookahead, struct out &r
             }
         }
     }
-    /* Otherwise, a unique byte has been encountered, add it to the search buffer.
+    /* Otherwise, a unique byte has been encountered, add it to the search comp::Buffer.
      *
-     * Additionally, this case is triggered if all bytes in the lookahead buffer form
-     * a substring somewhere in the search buffer. Example:
+     * Additionally, this case is triggered if all bytes in the lookahead comp::Buffer form
+     * a substring somewhere in the search comp::Buffer. Example:
      *
      *       SEARCH[n+1]         LOOKAHEAD[3]
      *
      * a0, a1, a2, a3, ..., an | a1, a2, a3
      *
-     * a1, a2 will be caught by the nested loops above, whereas a3 will be re-added to the search buffer as if was distinct,
-     * regardless if it already exists in the search buffer. This does weaken the compression ratio, but only by a negligible amount.
+     * a1, a2 will be caught by the nested loops above, whereas a3 will be re-added to the search comp::Buffer as if was distinct,
+     * regardless if it already exists in the search comp::Buffer. This does weaken the compression ratio, but only by a negligible amount.
      */
     result = {.bytes = {0, 0, lookahead.at(0)}};
 }
@@ -140,7 +92,7 @@ int main(int argc, char *argv[])
         const int lookahead_buffer_size = 24;
         const std::string out_filename = filename + extension;
 
-        Buffer search(search_buffer_size), lookahead(lookahead_buffer_size);
+        comp::Buffer search(search_buffer_size), lookahead(lookahead_buffer_size);
 
         std::ifstream in(filename, std::ios::binary);
         std::ofstream out(out_filename, std::ios::binary);
