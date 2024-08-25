@@ -15,13 +15,16 @@
 #include "common.hpp"
 
 /* Helper function to write bits to an output stream when the bit count not divisible by 8: */
-inline void write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t word_width)
+inline void _write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t word_width)
 {
-    std::cout << static_cast<int>(byte) << std::endl;
+    /*     std::cout << static_cast<int>(byte) << std::endl;
+     */
     byte <<= (32 - word_width);
 
     for (uint32_t t = 0x1 << 31; word_width; t >>= 1, word_width--)
     {
+        buf = buf | (((byte & t) ? 0x80 : 0) >> buf_size);
+        buf_size++;
         if (buf_size >= 8)
         {
             // printf("%02X ", buf);
@@ -30,10 +33,15 @@ inline void write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size,
             buf = 0;
             buf_size = 0;
         }
-        buf = buf | (((byte & t) ? 0x80 : 0) >> buf_size);
-        buf_size++;
+    }
+
+    if(buf_size != 0) {
+        printf("||%2X||", buf);
     }
 }
+
+
+#define write_stream(a, b, c, d, e) do{printf("Writing: %X %d\n", d, e);_write_stream(a, b, c, d, e);for (auto t : a){printf("|%02X", t);}printf("\n\n");}while(0)
 
 /* Prefix tree (dictionary): */
 struct node
@@ -135,7 +143,7 @@ struct node
 
         if (mode == 0x1)
         {
-            write_stream(out, buf, buf_size, 0x0, 1);
+            write_stream(out, buf, buf_size, 0x0, size_bits);
         }
     }
 
@@ -167,6 +175,12 @@ size_t get_chunk_from_buffer(std::vector<uint8_t> &buffer, size_t &byte_idx, uin
 
     size_t value = 0;
 
+/*     for (int i = 0; i < 8; i++)
+    {
+        printf("|%02X", buffer[byte_idx + i]);
+    }
+    printf("\n"); */
+
     for (auto t = 0; t < bit_count; t++, bit_idx++)
     {
         size_t mask = 0x1UL << (bit_count - 1 - t);
@@ -177,7 +191,8 @@ size_t get_chunk_from_buffer(std::vector<uint8_t> &buffer, size_t &byte_idx, uin
         }
         value |= ((buffer[byte_idx] & (0x80 >> bit_idx)) ? mask : 0);
     }
-    printf("\n");
+    
+    printf("Reading: %02X %d\n", value, bit_count);
 
     return value;
 }
@@ -197,7 +212,7 @@ public:
      * https://jrsoftware.org/ishelp/index.php?topic=setup_lzmadictionarysize
      */
     /* 0xFFFFF max recommended, consumes 2GB RAM (stale info, test again) */
-    const size_t maxsize = 0x1FFFF;
+    const size_t maxsize = 0xFFFF;
     size_t count;
     uint8_t bit_idx;
     size_t byte_idx;
@@ -274,13 +289,13 @@ public:
         current = current->bytes[byte].first;
     }
 
-    struct node *get_ptr(struct node *n, size_t parentidx, size_t byte)
+    struct node **get_ptr(struct node *n, size_t parentidx, size_t byte)
     {
         for (auto &[b, child] : n->bytes)
         {
-            if (child.second == parentidx && b == byte)
+            if ((child.second == parentidx) && (b == byte))
             {
-                return child.first;
+                return &(child.first);
             }
         }
 
@@ -323,49 +338,49 @@ public:
         }
     }
 
-    void build_from_stream(std::vector<uint8_t> &dict, uint8_t word_width)
+    size_t build_from_stream(std::vector<uint8_t> &dict, uint8_t word_width)
     {
-        printf("\n");
-        for (int i = 0; i < 8; i++)
-        {
-            printf("|%02X", dict[i]);
-        }
-        printf("\n");
+        size_t loaded_bytes = 0;
+
         /* TODO: word_width should be a class member */
         auto parentidx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
-        printf("bit_idx: %d\n", bit_idx);
-
+        loaded_bytes += word_width;
+        
         auto currentidx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
-
-        printf("bit_idx: %d\n", bit_idx);
+        loaded_bytes += word_width;
+        
         printf("Seek: parentidx = %d, currentidx = %d\n", parentidx, currentidx);
 
-        auto parent = get_ptr(root, parentidx, currentidx);
-        if (parent == nullptr)
+        auto child = get_ptr(root, parentidx, currentidx);
+        if (child == nullptr)
         {
-            printf("parent is null\n");
+            printf("Child is null\n");
             exit(EXIT_FAILURE);
         }
-        auto new_node = parent->bytes[currentidx].first = new struct node();
+
+        auto new_node = (*child) = new struct node();
 
         auto b = get_chunk_from_buffer(dict, byte_idx, bit_idx, 1);
-
+        loaded_bytes += 1;
+        
         if (b == 0)
         {
+            printf("Mode 0)\n");
             // TODO, don't hardcode
             for (int i = 0; i < 256; i++)
             {
                 auto points_to_idx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
+                loaded_bytes += word_width;
+        
                 if (points_to_idx)
                 {
                     new_node->bytes[i].second = points_to_idx;
                 }
             }
-            printf("0");
         }
         else
         {
-            printf("1");
+            printf("Mode 1)\n");
             size_t vals[2];
             int iter = 0;
             while ((vals[iter] = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width)))
@@ -379,8 +394,12 @@ public:
 
                     new_node->bytes[byte].second = points_to_idx;
                 }
+                loaded_bytes += word_width;
             }
+            loaded_bytes += word_width;
         }
+        
+        return loaded_bytes;
     }
 
     ~Dictionary()
@@ -605,14 +624,15 @@ int main(int argc, char *argv[])
         }
         printf("\nENCODED...\n");
 
-        printf("%02X", seq[seq.size() - 1]);
-
         Dictionary d;
+        size_t byte_count = 0;
 
-        while (!(dict.empty()))
+        while (byte_count < dict_bytecount)
         {
-            d.build_from_stream(dict, word_width);
+            byte_count += d.build_from_stream(dict, word_width);
         }
+
+        
 
         printf("\nBEGIN\n");
 
