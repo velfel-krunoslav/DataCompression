@@ -17,6 +17,7 @@
 /* Helper function to write bits to an output stream when the bit count not divisible by 8: */
 inline void write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t word_width)
 {
+    std::cout << static_cast<int>(byte) << std::endl;
     byte <<= (32 - word_width);
 
     for (uint32_t t = 0x1 << 31; word_width; t >>= 1, word_width--)
@@ -55,13 +56,13 @@ struct node
         }
     }
 
-    /* Set `this->bytes[idx]`flag to `byte`: */
-    bool insert(size_t child, uint8_t byte, size_t i)
+    /* Set `this->bytes[byte]`flag to `i`: */
+    bool insert(uint8_t byte, size_t i)
     {
-        if (bytes.find(child) == bytes.end())
+        if (bytes.find(byte) == bytes.end())
         {
             count++;
-            bytes[child] = std::make_pair(nullptr, i);
+            bytes[byte] = std::make_pair(nullptr, i);
             return true;
         }
         return false;
@@ -121,6 +122,7 @@ struct node
             {
                 if (mode == 0x1)
                 {
+                    /* TODO: replace size_bits with width(type(idx)) */
                     write_stream(out, buf, buf_size, idx, size_bits);
                 }
                 write_stream(out, buf, buf_size, bytes[idx].second, size_bits);
@@ -169,8 +171,10 @@ public:
     struct node *root;
 
     /* Iterators: */
-    struct node **it;
-    struct node *prev;
+    struct node *previous, *current;
+
+    /* `previous->bytes[idx] == current` */
+    uint8_t idx;
 
     /* Dictionary size:
      * https://jrsoftware.org/ishelp/index.php?topic=setup_lzmadictionarysize
@@ -178,8 +182,6 @@ public:
     /* 0xFFFFF max recommended, consumes 2GB RAM (stale info, test again) */
     const size_t maxsize = 0x1FFFF;
     size_t count;
-
-    size_t depth = 0;
 
     Dictionary()
     {
@@ -192,91 +194,72 @@ public:
         /* Populate the dictionary with bytes 0, ..., 255 ahead of time: */
         for (size_t byte = 0; byte < node::maxbytes; byte++)
         {
-            try_move_or_insert(byte, status);
-            reset();
+            root->insert(byte, 0);
         }
-    }
-
-    bool get_idx(size_t &byte)
-    {
-        for (auto [n, pair] : prev->bytes)
-        {
-            if (pair.first == (*it))
-            {
-                byte = n;
-                return true;
-            }
-        }
-        return false;
     }
 
     void reset()
     {
-        it = &root;
-        prev = root;
-        depth = 0;
+        idx = std::numeric_limits<unsigned int>::infinity();
+        previous = current = root;
     }
 
     enum try_status
     {
-        unset,
+        unset = 0,
         /* A new node has been inserted to accomodate the unique word being added to the dictionary: */
-        new_node,
-
-        /* No new nodes - simply a flag byte has been set: */
-        flag_only,
+        new_node_or_flag = 1,
 
         /* Insertion was attempted but the dictionary is full: */
-        no_space_left,
+        no_space_left = 3,
 
         /* No insertions needed - just traverse the tree: */
-        move_only
+        move_only = 4
     };
 
     void try_move_or_insert(uint8_t byte, try_status &status)
     {
         status = unset;
 
-        if ((*it) == nullptr)
+        if (count == maxsize)
         {
-            if (status == unset)
-                status = new_node;
-
-            if (count == maxsize)
-            {
-                status = no_space_left;
-                reset();
-                return;
-            }
-
-            *it = new struct node;
+            status = no_space_left;
+            reset();
+            return;
         }
 
-        auto _prev = prev;
-        prev = (*it);
-
-        if (prev->bytes.find(byte) == prev->bytes.end())
+        if (current == nullptr)
         {
-            if (count == maxsize)
-            {
-                status = no_space_left;
-                prev = _prev;
-                return;
-            }
-            else
-            {
-                prev->bytes[byte] = std::make_pair(nullptr, count++);
-                status = flag_only;
-                reset();
-            }
+            previous->bytes[idx].first = current = new struct node();
         }
-        else if (status == unset)
+
+        if (current->bytes.find(byte) == current->bytes.end())
+        {
+            status = new_node_or_flag;
+            current->bytes[byte].second = ++count;
+
+            reset();
+        }
+        else
         {
             status = move_only;
         }
 
-        it = &((*it)->bytes[byte].first);
-        depth++;
+        previous = current;
+        idx = byte;
+
+        current = current->bytes[byte].first;
+    }
+
+    void flush(std::vector<char> &out, uint8_t &buf, size_t &buf_size, size_t size_bits)
+    {
+        for (auto &[byte, child] : root->bytes)
+        {
+            if (child.first)
+            {
+                child.first->flush(out, buf, buf_size, size_bits);
+            }
+        }
     }
 
     ~Dictionary()
@@ -292,19 +275,47 @@ std::ostream &operator<<(std::ostream &o, const Dictionary::try_status &s)
     case Dictionary::unset:
         o << "unset";
         break;
-    case Dictionary::new_node:
-        o << "new_node";
-        break;
-    case Dictionary::flag_only:
-        o << "flag_only";
+    case Dictionary::new_node_or_flag:
+        o << "new_node_or_flag";
         break;
     case Dictionary::no_space_left:
         o << "no_space_left";
         break;
-    case Dictionary::move_only:
+    default:
         o << "move_only";
-        break;
     }
+}
+
+size_t get_chunk_from_buffer(std::vector<uint8_t> &buffer, uint8_t &bit_idx, uint8_t bit_count)
+{
+    if (bit_count > 64)
+    {
+        std::cerr << "Bit limit exceeded " << __LINE__ << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    uint8_t repetitions = bit_count;
+
+    size_t value = 0;
+    size_t mask = 0x1;
+    mask <<= 63;
+
+    for (auto t = 0; t < repetitions; t++, bit_idx++)
+    {
+        if (bit_idx >= 64)
+        {
+            if (buffer.empty())
+            {
+                return value;
+            }
+            buffer.erase(buffer.begin());
+            bit_idx = 0;
+        }
+
+        value |= ((mask >> bit_idx) & buffer[0]);
+    }
+
+    return value;
 }
 
 int main(int argc, char *argv[])
@@ -360,20 +371,15 @@ int main(int argc, char *argv[])
             Dictionary::try_status status;
             dict.try_move_or_insert(byte, status);
 
+            // std::cout << status << std::endl;
+
             // std::cout << status << "[" << dict.depth << "]" << std::endl;
 
-            if (status == Dictionary::try_status::new_node)
+            if (status == Dictionary::try_status::new_node_or_flag)
             {
                 /* This byte/sequence of bytes has never been encountered, and has just been added.
                  * Write its index in the compressed file: */
-
-                size_t idx;
-                auto found = dict.get_idx(idx);
-                if (found == false)
-                {
-                    exit(EXIT_FAILURE);
-                }
-                write_stream(outbuf, buf, buf_size, idx, word_width);
+                write_stream(outbuf, buf, buf_size, dict.count, word_width);
 
                 dict.reset();
             }
@@ -382,16 +388,9 @@ int main(int argc, char *argv[])
 
                 /* Insertion has failed because the dictionary has no space left: */
                 /* Firstly, handle the traversed substring from the dictionary:  */
-                if (*(dict.it) != dict.prev)
+                if (dict.previous != dict.current)
                 {
-                    size_t prev_idx;
-                    auto found = dict.get_idx(prev_idx);
-                    if (found == false)
-                    {
-                        exit(EXIT_FAILURE);
-                    }
-
-                    write_stream(outbuf, buf, buf_size, prev_idx, word_width);
+                    write_stream(outbuf, buf, buf_size, dict.idx, word_width);
                 }
                 /* ...then separately output the byte in question without adding a new entry to the dictionary. */
                 write_stream(outbuf, buf, buf_size, byte, word_width);
@@ -399,15 +398,9 @@ int main(int argc, char *argv[])
             }
         }
 
-        if (*(dict.it) != dict.prev)
+        if (dict.previous != dict.current)
         {
-            size_t prev_idx;
-            auto found = dict.get_idx(prev_idx);
-            if (found == false)
-            {
-                exit(EXIT_FAILURE);
-            }
-            write_stream(outbuf, buf, buf_size, prev_idx, word_width);
+            write_stream(outbuf, buf, buf_size, dict.idx, word_width);
         }
 
         std::vector<char> dictout;
@@ -415,7 +408,7 @@ int main(int argc, char *argv[])
         size_t dictout_bufsize = 0;
 
         /* Write the dictionary contents: */
-        dict.root->flush(dictout, dictoutbuf, dictout_bufsize, word_width);
+        dict.flush(dictout, dictoutbuf, dictout_bufsize, word_width);
 
         /* And the size of the dictionary itself: */
         auto dictout_size = dictout.size();
@@ -434,11 +427,11 @@ int main(int argc, char *argv[])
         /* Write encoded bytes to the file: */
         out.write(outbuf.data(), outbuf.size());
 
-        /*         printf("%2X,%2X,%2X,%2X\n", outbuf[0], outbuf[1], outbuf[2], outbuf[3]);
+        printf("...DICT END\n");
+        printf("%2X,%2X,%2X,%2X\n", dictout[dictout.size() - 4], dictout[dictout.size() - 3], dictout[dictout.size() - 2], dictout[dictout.size() - 1]);
 
-                printf("...DICT END\n");
-                printf("%2X,%2X,%2X,%2X\n", dictout[dictout.size() - 4], dictout[dictout.size() - 3], dictout[dictout.size() - 2], dictout[dictout.size() - 1]);
-                printf("ENCODED START...\n"); */
+        printf("ENCODED START...\n");
+        printf("%2X,%2X,%2X,%2X\n", outbuf[0], outbuf[1], outbuf[2], outbuf[3]);
 
         std::cout << "Word width:" << static_cast<int>(word_width) << std::endl;
         std::cout << "Dict maxsize:" << dict.maxsize << std::endl;
@@ -492,35 +485,79 @@ int main(int argc, char *argv[])
             dict_bytecount |= (static_cast<size_t>(byte) << (8 * i));
         }
 
-        printf("Dict byte size: %d\n", dict_bytecount);
+        std::cout << "Dict bytecount: " << dict_bytecount << std::endl;
 
-        std::vector<uint8_t> inbuf;
+        std::vector<uint8_t> dict, seq;
 
         for (int i = 0; i < dict_bytecount; i++)
         {
             in.read(reinterpret_cast<char *>(&byte), sizeof(byte));
-            inbuf.push_back(byte);
+            dict.push_back(byte);
         }
-
-        uint8_t *start_dict = inbuf.data();
-        uint8_t *end_dict = inbuf.data() + (inbuf.size() - 1);
 
         uint8_t word_width;
         in.read(reinterpret_cast<char *>(&word_width), sizeof(word_width));
 
-        uint8_t *start_encoded = end_dict + 1;
-
         while (in.read(reinterpret_cast<char *>(&byte), sizeof(byte)))
         {
-            inbuf.push_back(byte);
+            seq.push_back(byte);
         }
 
-        uint8_t *end_encoded = inbuf.data() + (inbuf.size() - 1);
+        printf("DICT:\n");
+        for (int i = 0; i < 8; i++)
+        {
+            printf("%02X ", dict[i]);
+        }
+        printf("\n...WW: %d...\n", word_width);
 
-        /*         printf("Word width: %d\n", word_width);
-                printf("%2X,%2X,%2X,%2X\n", *(end_dict-3), *(end_dict-2), *(end_dict-1), *(end_dict));
-                printf("%2X,%2X,%2X,%2X\n", start_encoded[0], start_encoded[1], start_encoded[2], start_encoded[3]);
-         */
+        for (int i = 0; i < 4; i++)
+        {
+            printf("%02X ", seq[i]);
+        }
+        printf("\nENCODED...\n");
+
+        printf("%02X", seq[seq.size() - 1]);
+
+        uint8_t bit_idx = 0;
+
+        while (!(dict.empty()))
+        {
+            auto b = get_chunk_from_buffer(dict, bit_idx, 1);
+
+            if (b == 0)
+            {
+                // TODO, don't hardcode
+                for (int i = 0; i < 256; i++)
+                {
+                    auto points_to_idx = get_chunk_from_buffer(dict, bit_idx, word_width);
+                    // CONTINUE HERE
+                }
+                printf("0");
+            }
+            else
+            {
+                printf("1");
+                size_t vals[2];
+                int iter = 0;
+                while ((vals[iter] = get_chunk_from_buffer(dict, bit_idx, word_width)))
+                {
+                    iter++;
+                    if (iter % 2 == 0)
+                    {
+                        iter = 0;
+                        auto byte = vals[0];
+                        auto points_to_idx = vals[1];
+                    }
+                }
+            }
+        }
+
+        for (const char c: decoded)
+        {
+            printf("%2X ", c);
+        }
+        printf("\n");
+
         /* Dump contents: */
         // out.write(reinterpret_cast<const char *>(decoded.data()), decoded.size());
 
