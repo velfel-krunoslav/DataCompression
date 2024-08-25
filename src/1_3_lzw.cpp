@@ -137,14 +137,6 @@ struct node
         {
             write_stream(out, buf, buf_size, 0x0, 1);
         }
-
-        for (auto [byte, pair] : bytes)
-        {
-            if (pair.first)
-            {
-                pair.first->flush(out, buf, buf_size, size_bits);
-            }
-        }
     }
 
     void print(std::string indent = "->")
@@ -165,6 +157,31 @@ struct node
     }
 };
 
+size_t get_chunk_from_buffer(std::vector<uint8_t> &buffer, size_t &byte_idx, uint8_t &bit_idx, uint8_t bit_count)
+{
+    if (bit_count > 64)
+    {
+        std::cerr << "Bit limit exceeded " << __LINE__ << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    size_t value = 0;
+
+    for (auto t = 0; t < bit_count; t++, bit_idx++)
+    {
+        size_t mask = 0x1UL << (bit_count - 1 - t);
+        if (bit_idx >= 8)
+        {
+            bit_idx = 0;
+            byte_idx++;
+        }
+        value |= ((buffer[byte_idx] & (0x80 >> bit_idx)) ? mask : 0);
+    }
+    printf("\n");
+
+    return value;
+}
+
 class Dictionary
 {
 public:
@@ -182,6 +199,8 @@ public:
     /* 0xFFFFF max recommended, consumes 2GB RAM (stale info, test again) */
     const size_t maxsize = 0x1FFFF;
     size_t count;
+    uint8_t bit_idx;
+    size_t byte_idx;
 
     Dictionary()
     {
@@ -196,6 +215,10 @@ public:
         {
             root->insert(byte, 0);
         }
+
+        /* Used by build_from_stream(): */
+        bit_idx = 0;
+        byte_idx = 0;
     }
 
     void reset()
@@ -251,13 +274,111 @@ public:
         current = current->bytes[byte].first;
     }
 
+    struct node *get_ptr(struct node *n, size_t parentidx, size_t byte)
+    {
+        for (auto &[b, child] : n->bytes)
+        {
+            if (child.second == parentidx && b == byte)
+            {
+                return child.first;
+            }
+        }
+
+        for (auto &[b, child] : n->bytes)
+        {
+            if (child.first)
+            {
+                return get_ptr(child.first, parentidx, byte);
+            }
+        }
+
+        return nullptr;
+    }
+
+    void _flush(struct node *current, size_t parentidx, size_t currentidx, std::vector<char> &out, uint8_t &buf, size_t &buf_size, size_t size_bits)
+    {
+        write_stream(out, buf, buf_size, parentidx, size_bits);
+        write_stream(out, buf, buf_size, currentidx, size_bits);
+
+        current->flush(out, buf, buf_size, size_bits);
+
+        for (auto &[byte, child] : current->bytes)
+        {
+            if (child.first)
+            {
+                _flush(child.first, child.second, byte, out, buf, buf_size, size_bits);
+            }
+        }
+    }
+
     void flush(std::vector<char> &out, uint8_t &buf, size_t &buf_size, size_t size_bits)
     {
         for (auto &[byte, child] : root->bytes)
         {
             if (child.first)
             {
-                child.first->flush(out, buf, buf_size, size_bits);
+                reset();
+                _flush(child.first, 0, byte, out, buf, buf_size, size_bits);
+            }
+        }
+    }
+
+    void build_from_stream(std::vector<uint8_t> &dict, uint8_t word_width)
+    {
+        printf("\n");
+        for (int i = 0; i < 8; i++)
+        {
+            printf("|%02X", dict[i]);
+        }
+        printf("\n");
+        /* TODO: word_width should be a class member */
+        auto parentidx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
+        printf("bit_idx: %d\n", bit_idx);
+
+        auto currentidx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
+
+        printf("bit_idx: %d\n", bit_idx);
+        printf("Seek: parentidx = %d, currentidx = %d\n", parentidx, currentidx);
+
+        auto parent = get_ptr(root, parentidx, currentidx);
+        if (parent == nullptr)
+        {
+            printf("parent is null\n");
+            exit(EXIT_FAILURE);
+        }
+        auto new_node = parent->bytes[currentidx].first = new struct node();
+
+        auto b = get_chunk_from_buffer(dict, byte_idx, bit_idx, 1);
+
+        if (b == 0)
+        {
+            // TODO, don't hardcode
+            for (int i = 0; i < 256; i++)
+            {
+                auto points_to_idx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
+                if (points_to_idx)
+                {
+                    new_node->bytes[i].second = points_to_idx;
+                }
+            }
+            printf("0");
+        }
+        else
+        {
+            printf("1");
+            size_t vals[2];
+            int iter = 0;
+            while ((vals[iter] = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width)))
+            {
+                iter++;
+                if (iter % 2 == 0)
+                {
+                    iter = 0;
+                    auto byte = vals[0];
+                    auto points_to_idx = vals[1];
+
+                    new_node->bytes[byte].second = points_to_idx;
+                }
             }
         }
     }
@@ -284,38 +405,6 @@ std::ostream &operator<<(std::ostream &o, const Dictionary::try_status &s)
     default:
         o << "move_only";
     }
-}
-
-size_t get_chunk_from_buffer(std::vector<uint8_t> &buffer, uint8_t &bit_idx, uint8_t bit_count)
-{
-    if (bit_count > 64)
-    {
-        std::cerr << "Bit limit exceeded " << __LINE__ << std::endl;
-        exit(EXIT_FAILURE);
-    }
-
-    uint8_t repetitions = bit_count;
-
-    size_t value = 0;
-    size_t mask = 0x1;
-    mask <<= 63;
-
-    for (auto t = 0; t < repetitions; t++, bit_idx++)
-    {
-        if (bit_idx >= 64)
-        {
-            if (buffer.empty())
-            {
-                return value;
-            }
-            buffer.erase(buffer.begin());
-            bit_idx = 0;
-        }
-
-        value |= ((mask >> bit_idx) & buffer[0]);
-    }
-
-    return value;
 }
 
 int main(int argc, char *argv[])
@@ -518,41 +607,16 @@ int main(int argc, char *argv[])
 
         printf("%02X", seq[seq.size() - 1]);
 
-        uint8_t bit_idx = 0;
+        Dictionary d;
 
         while (!(dict.empty()))
         {
-            auto b = get_chunk_from_buffer(dict, bit_idx, 1);
-
-            if (b == 0)
-            {
-                // TODO, don't hardcode
-                for (int i = 0; i < 256; i++)
-                {
-                    auto points_to_idx = get_chunk_from_buffer(dict, bit_idx, word_width);
-                    // CONTINUE HERE
-                }
-                printf("0");
-            }
-            else
-            {
-                printf("1");
-                size_t vals[2];
-                int iter = 0;
-                while ((vals[iter] = get_chunk_from_buffer(dict, bit_idx, word_width)))
-                {
-                    iter++;
-                    if (iter % 2 == 0)
-                    {
-                        iter = 0;
-                        auto byte = vals[0];
-                        auto points_to_idx = vals[1];
-                    }
-                }
-            }
+            d.build_from_stream(dict, word_width);
         }
 
-        for (const char c: decoded)
+        printf("\nBEGIN\n");
+
+        for (const char c : decoded)
         {
             printf("%2X ", c);
         }
