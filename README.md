@@ -5,3 +5,5 @@ Implementacije Shannon-Fano, Huffman, LZ77 i LZW algoritama u C++ programskom je
 `docs/` - postavke zadataka
 
 `include/` - dijeljeni kod
+
+`src/` - izvorni kod
