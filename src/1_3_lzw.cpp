@@ -1,9 +1,3 @@
-/*  CHECK .XLSX and examine why is the dictionary not getting filled to its maximum.
-    Could count++ be the culprit?
-
-    Also, test variable dictionary word size.
- */
-
 #include <iostream>
 #include <cstdint>
 #include <cstdlib>
@@ -15,7 +9,7 @@
 #include "common.hpp"
 
 /* Helper function to write bits to an output stream when the bit count not divisible by 8: */
-inline void _write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t word_width)
+inline void write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size, uint32_t byte, size_t word_width)
 {
     /*     std::cout << static_cast<int>(byte) << std::endl;
      */
@@ -34,14 +28,19 @@ inline void _write_stream(std::vector<char> &out, uint8_t &buf, size_t &buf_size
             buf_size = 0;
         }
     }
-
-    if(buf_size != 0) {
-        printf("||%2X||", buf);
-    }
 }
 
-
-#define write_stream(a, b, c, d, e) do{printf("Writing: %X %d\n", d, e);_write_stream(a, b, c, d, e);for (auto t : a){printf("|%02X", t);}printf("\n\n");}while(0)
+/* #define write_stream(a, b, c, d, e)                       \
+    do                                                    \
+    {                                                     \
+        printf("Writing: %X %d\n", d, e);                 \
+        _write_stream(a, b, c, d, e);                     \
+        for (int i = (a).size() - 2; i < (a).size(); i++) \
+        {                                                 \
+            printf("|%02X", a[i]);                        \
+        }                                                 \
+        printf("\n\n");                                   \
+    } while (0) */
 
 /* Prefix tree (dictionary): */
 struct node
@@ -49,7 +48,7 @@ struct node
     static const size_t maxbytes = 256;
 
     size_t count;
-    std::unordered_map<uint8_t, std::pair<struct node *, size_t>> bytes;
+    std::map<uint8_t, std::pair<struct node *, size_t>> bytes;
 
     node() : count(0) {}
 
@@ -114,6 +113,8 @@ struct node
     {
         size_t mode = 0x0;
 
+        std::vector<size_t> raw;
+
         auto nullcount = maxbytes - bytes.size();
 
         /* TODO: there may be a beter cutoff limit than (bsize / 2), which may improve the compression ratio even further: */
@@ -124,6 +125,11 @@ struct node
 
         write_stream(out, buf, buf_size, mode, 1);
 
+        if (mode = 0x1)
+        {
+            write_stream(out, buf, buf_size, bytes.size() * 2, size_bits);
+        }
+
         for (size_t idx = 0; idx < maxbytes; idx++)
         {
             if (bytes.find(idx) != bytes.end())
@@ -132,34 +138,41 @@ struct node
                 {
                     /* TODO: replace size_bits with width(type(idx)) */
                     write_stream(out, buf, buf_size, idx, size_bits);
+                    raw.push_back(idx);
                 }
                 write_stream(out, buf, buf_size, bytes[idx].second, size_bits);
+                raw.push_back(bytes[idx].second);
             }
             else if (mode == 0x0)
             {
                 write_stream(out, buf, buf_size, 0x0, size_bits);
+                raw.push_back(0x0);
             }
         }
-
-        if (mode == 0x1)
-        {
-            write_stream(out, buf, buf_size, 0x0, size_bits);
-        }
+        /*
+                for (auto q : raw)
+                {
+                    printf("|%d", q);
+                }
+                printf("\n@%d\n\n", raw.size()); */
     }
 
-    void print(std::string indent = "->")
+    void print()
     {
         std::map m(bytes.begin(), bytes.end());
 
         for (auto [byte, pair] : m)
         {
-            std::cout << indent;
+            ;
             auto next = pair.first;
             auto idx = pair.second;
-            printf("[%02X, %d]\n", byte, idx);
+            if (idx)
+            {
+                printf("| %d", idx);
+            }
             if (next)
             {
-                next->print(std::string("    ") + indent);
+                next->print();
             }
         }
     }
@@ -175,12 +188,6 @@ size_t get_chunk_from_buffer(std::vector<uint8_t> &buffer, size_t &byte_idx, uin
 
     size_t value = 0;
 
-/*     for (int i = 0; i < 8; i++)
-    {
-        printf("|%02X", buffer[byte_idx + i]);
-    }
-    printf("\n"); */
-
     for (auto t = 0; t < bit_count; t++, bit_idx++)
     {
         size_t mask = 0x1UL << (bit_count - 1 - t);
@@ -191,8 +198,6 @@ size_t get_chunk_from_buffer(std::vector<uint8_t> &buffer, size_t &byte_idx, uin
         }
         value |= ((buffer[byte_idx] & (0x80 >> bit_idx)) ? mask : 0);
     }
-    
-    printf("Reading: %02X %d\n", value, bit_count);
 
     return value;
 }
@@ -228,7 +233,7 @@ public:
         /* Populate the dictionary with bytes 0, ..., 255 ahead of time: */
         for (size_t byte = 0; byte < node::maxbytes; byte++)
         {
-            root->insert(byte, 0);
+            root->insert(byte, ++count);
         }
 
         /* Used by build_from_stream(): */
@@ -289,39 +294,59 @@ public:
         current = current->bytes[byte].first;
     }
 
-    struct node **get_ptr(struct node *n, size_t parentidx, size_t byte)
+    bool get_ptr(struct node *n, size_t parentidx, struct node ***result)
     {
-        for (auto &[b, child] : n->bytes)
-        {
-            if ((child.second == parentidx) && (b == byte))
-            {
-                return &(child.first);
-            }
-        }
-
+        bool ret = false;
         for (auto &[b, child] : n->bytes)
         {
             if (child.first)
             {
-                return get_ptr(child.first, parentidx, byte);
+                ret = ret || get_ptr(child.first, parentidx, result);
+            }
+
+            if (child.second == parentidx)
+            {
+                *result = &(child.first);
+                printf("|%d", parentidx);
+                return true;
             }
         }
 
-        return nullptr;
+        return ret;
+    }
+    bool find_node_and_decode(struct node *n, size_t parentidx, std::vector<uint8_t> &bytes)
+    {
+        bool ret = false;
+        for (auto &[b, child] : n->bytes)
+        {
+            if (child.first)
+            {
+                ret = ret || find_node_and_decode(child.first, parentidx, bytes);
+            }
+
+            if (child.second == parentidx)
+            {
+                return true;
+            }
+        }
+
+        return ret;
     }
 
-    void _flush(struct node *current, size_t parentidx, size_t currentidx, std::vector<char> &out, uint8_t &buf, size_t &buf_size, size_t size_bits)
-    {
+    void _flush(struct node *current, size_t parentidx, std::vector<char> &out, uint8_t &buf, size_t &buf_size, size_t size_bits)
+    { /*
+         printf("[%d] ", parentidx); */
         write_stream(out, buf, buf_size, parentidx, size_bits);
-        write_stream(out, buf, buf_size, currentidx, size_bits);
 
         current->flush(out, buf, buf_size, size_bits);
+
+        /* printf("\n") */;
 
         for (auto &[byte, child] : current->bytes)
         {
             if (child.first)
             {
-                _flush(child.first, child.second, byte, out, buf, buf_size, size_bits);
+                _flush(child.first, child.second, out, buf, buf_size, size_bits);
             }
         }
     }
@@ -332,46 +357,62 @@ public:
         {
             if (child.first)
             {
-                reset();
-                _flush(child.first, 0, byte, out, buf, buf_size, size_bits);
+                _flush(child.first, child.second, out, buf, buf_size, size_bits);
             }
         }
     }
 
     size_t build_from_stream(std::vector<uint8_t> &dict, uint8_t word_width)
     {
-        size_t loaded_bytes = 0;
+        size_t loaded_bits = 0;
 
         /* TODO: word_width should be a class member */
         auto parentidx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
-        loaded_bytes += word_width;
-        
-        auto currentidx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
-        loaded_bytes += word_width;
-        
-        printf("Seek: parentidx = %d, currentidx = %d\n", parentidx, currentidx);
-
-        auto child = get_ptr(root, parentidx, currentidx);
-        if (child == nullptr)
-        {
-            printf("Child is null\n");
-            exit(EXIT_FAILURE);
-        }
-
-        auto new_node = (*child) = new struct node();
+        loaded_bits += word_width;
 
         auto b = get_chunk_from_buffer(dict, byte_idx, bit_idx, 1);
-        loaded_bytes += 1;
-        
+        loaded_bits += 1;
+
+        struct node **child;
+        bool found = get_ptr(root, parentidx, &child);
+
+        /* for (auto &[t, u] : root->bytes)
+        {
+            if (u.first)
+            {
+
+            }
+        } */
+        if (found == false)
+        {
+            printf("\nLookup failed for: %d\n", parentidx); /*
+             auto parent = get_ptr(root, 2, &child);
+             if(parent == false) {
+                 printf("NONEXISTANT PARENT\n");
+             } else {
+                 printf("Established idx(s):\n");
+                 for(auto &[t, u]:(*child)->bytes) {
+                     printf("|%d (at %d)", u.second, t);
+                 }
+                 printf("\n");
+             }
+             struct node **c2;
+             parent = get_ptr((*child), 367, &c2);
+             printf("Second attempt: %d\n", parent); */
+            // root->print();
+            exit(EXIT_FAILURE);
+        }
+        auto new_node = (*child) = new struct node();
+
         if (b == 0)
         {
-            printf("Mode 0)\n");
+            /* Mode 0) */
             // TODO, don't hardcode
             for (int i = 0; i < 256; i++)
             {
                 auto points_to_idx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
-                loaded_bytes += word_width;
-        
+                loaded_bits += word_width;
+
                 if (points_to_idx)
                 {
                     new_node->bytes[i].second = points_to_idx;
@@ -380,26 +421,22 @@ public:
         }
         else
         {
-            printf("Mode 1)\n");
-            size_t vals[2];
-            int iter = 0;
-            while ((vals[iter] = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width)))
-            {
-                iter++;
-                if (iter % 2 == 0)
-                {
-                    iter = 0;
-                    auto byte = vals[0];
-                    auto points_to_idx = vals[1];
+            /* Mode 1) */
+            auto count = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
+            loaded_bits += word_width;
 
-                    new_node->bytes[byte].second = points_to_idx;
-                }
-                loaded_bytes += word_width;
+            for (int i = 0; i < (count / 2); i++)
+            {
+                auto byte = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
+                auto points_to_idx = get_chunk_from_buffer(dict, byte_idx, bit_idx, word_width);
+
+                loaded_bits += (word_width + word_width);
+
+                new_node->bytes[byte].second = points_to_idx;
             }
-            loaded_bytes += word_width;
         }
-        
-        return loaded_bytes;
+
+        return loaded_bits;
     }
 
     ~Dictionary()
@@ -520,7 +557,8 @@ int main(int argc, char *argv[])
 
         /* And the size of the dictionary itself: */
         auto dictout_size = dictout.size();
-        printf("%d\n", dictout_size);
+        printf("Dictout size: %ld\n", dictout_size);
+
         for (int i = 0; i < sizeof(size_t); i++)
         {
             uint8_t outbyte = (dictout_size >> (8 * i)) & 0xFF;
@@ -535,12 +573,12 @@ int main(int argc, char *argv[])
         /* Write encoded bytes to the file: */
         out.write(outbuf.data(), outbuf.size());
 
-        printf("...DICT END\n");
-        printf("%2X,%2X,%2X,%2X\n", dictout[dictout.size() - 4], dictout[dictout.size() - 3], dictout[dictout.size() - 2], dictout[dictout.size() - 1]);
+        /*         printf("...DICT END\n");
+                printf("%2X,%2X,%2X,%2X\n", dictout[dictout.size() - 4], dictout[dictout.size() - 3], dictout[dictout.size() - 2], dictout[dictout.size() - 1]);
 
-        printf("ENCODED START...\n");
-        printf("%2X,%2X,%2X,%2X\n", outbuf[0], outbuf[1], outbuf[2], outbuf[3]);
-
+                printf("ENCODED START...\n");
+                printf("%2X,%2X,%2X,%2X\n", outbuf[0], outbuf[1], outbuf[2], outbuf[3]);
+         */
         std::cout << "Word width:" << static_cast<int>(word_width) << std::endl;
         std::cout << "Dict maxsize:" << dict.maxsize << std::endl;
         std::cout << "Dict count:" << dict.count << std::endl;
@@ -575,11 +613,11 @@ int main(int argc, char *argv[])
             std::cerr << "Error opening file " << filename << std::endl;
             return EXIT_FAILURE;
         }
-        /* if (!out)
-        {
-            std::cerr << "Error opening file " << out_filename << std::endl;
-            return EXIT_FAILURE;
-        } */
+        /*         if (!out)
+                {
+                    std::cerr << "Error opening file " << out_filename << std::endl;
+                    return EXIT_FAILURE;
+                } */
 
         std::vector<uint8_t> decoded;
 
@@ -605,42 +643,71 @@ int main(int argc, char *argv[])
 
         uint8_t word_width;
         in.read(reinterpret_cast<char *>(&word_width), sizeof(word_width));
+        printf("Word width: %d\n", word_width);
 
         while (in.read(reinterpret_cast<char *>(&byte), sizeof(byte)))
         {
             seq.push_back(byte);
         }
 
-        printf("DICT:\n");
-        for (int i = 0; i < 8; i++)
-        {
-            printf("%02X ", dict[i]);
-        }
-        printf("\n...WW: %d...\n", word_width);
-
-        for (int i = 0; i < 4; i++)
-        {
-            printf("%02X ", seq[i]);
-        }
-        printf("\nENCODED...\n");
-
         Dictionary d;
-        size_t byte_count = 0;
+        size_t loaded_bits = 0;
 
-        while (byte_count < dict_bytecount)
+        while (loaded_bits / 8 < dict_bytecount)
         {
-            byte_count += d.build_from_stream(dict, word_width);
+            loaded_bits += d.build_from_stream(dict, word_width);
         }
-
-        
 
         printf("\nBEGIN\n");
 
-        for (const char c : decoded)
+        loaded_bits = 0;
+
+        size_t byte_idx = 0;
+        uint8_t bit_idx = 0;
+
+        std::vector<uint8_t> decoded_buf;
+        /*
+                d.root->print();
+                printf("\n"); */
+
+        while (loaded_bits / 8 < seq.size())
         {
-            printf("%2X ", c);
-        }
-        printf("\n");
+            auto idx = get_chunk_from_buffer(seq, byte_idx, bit_idx, word_width);
+            loaded_bits += word_width;
+/* 
+            printf("Idx: %d\n", idx); */
+
+            struct node **child;
+
+            auto found = d.get_ptr(d.root, idx, &child);
+/* 
+            printf("%d\n", found); */
+
+            if(found == false) {
+                printf("Err\n");
+                exit(EXIT_FAILURE);
+            }
+
+
+            
+
+            /* if (d.find_node_and_decode(d.root, idx, decoded_buf))
+            {
+                decoded.insert(decoded.end(), decoded_buf.begin(), decoded_buf.end());
+                decoded_buf.clear();
+            }
+            else
+            {
+                std::cerr << "Fatal error idx = " << idx << " not found" << std::endl;
+                exit(EXIT_FAILURE);
+            } */
+        } /*
+
+          for (uint8_t c : decoded)
+          {
+              printf("%2X ", c);
+          }
+          printf("\n"); */
 
         /* Dump contents: */
         // out.write(reinterpret_cast<const char *>(decoded.data()), decoded.size());
