@@ -30,6 +30,26 @@ namespace comp
         static void _huffman_code_gen(std::shared_ptr<comp::common::_node> &, std::vector<bool> &, std::map<uint8_t, std::vector<bool>> &);
         static std::shared_ptr<comp::common::_node> join_nodes(std::shared_ptr<comp::common::_node>, std::shared_ptr<comp::common::_node>);
     };
+
+    class Buffer
+    {
+    private:
+        Buffer();
+
+    public:
+        Buffer(uint8_t);
+
+        const uint8_t maxbufsize;
+        std::unique_ptr<uint8_t[]> buf;
+        uint8_t size = 0;
+        uint8_t begin = 0;
+
+        void push(uint8_t);
+        uint8_t pop();
+
+        uint8_t at(uint8_t);
+    };
+
 }
 
 #endif
